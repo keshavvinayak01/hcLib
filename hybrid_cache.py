@@ -5,16 +5,16 @@ import numpy as np
 from typing import Any, Optional
 from dataclasses import dataclass
 from nvidia.dali.pipeline import Pipeline
-import nvidia.dali.fn as fn
 # from nvidia.dali.plugin.base_iterator import _DaliBaseIterator
 # from nvidia.dali.plugin.pytorch import DALIGenericIterator, LastBatchPolicy
-from external_sources import create_pipe
+from pipegen import create_pipe, merge_and_collect_pipes
 from annotate import get_annotated_computational_graph
-from profiler import profile_device, filter_important_steps, get_worker_profile, profile_steps
-from iterator import SHCGenericIterator
+from profiler import profile_device, filter_important_steps, profile_steps
+from memory_estimator import adjust_for_activemem
+from iterator import HyCacheGenericIterator
 from math import ceil
 from utils import get_mem_size, get_presto_solution
-import solver
+from solver import get_cache_solution
 import time
 
 """
@@ -25,7 +25,7 @@ import time
 # 3. Get ILP solution for both disk and memory
 # 4. Pipeline merge should be enabled by default
 # 5. Create all pipelines as per available solutions
-# 6. get_iterator() function should return the SHCGenericIterator
+# 6. get_iterator() function should return the HyCacheGenericIterator
 """
 
 class BasePipeline(Pipeline):
@@ -200,7 +200,7 @@ class HyCache:
             if self.config.memcache_size > 0:
                 mem_profile.pop(-1)
                 memcache_sizes, memcache_steps, memcached_tensors = \
-                    solver.get_cache_solution(self.args['world_size']*len(self.config.dataset), mem_profile, cache_size/1024)
+                    get_cache_solution(self.args['world_size']*len(self.config.dataset), mem_profile, cache_size/1024)
                 remaining_samples -= memcached_tensors
             memcache_sizes = memcache_sizes[::-1]
             memcache_steps = memcache_steps[::-1]
@@ -211,7 +211,7 @@ class HyCache:
                 # Considering raw data to be cached as well.
                 disk_profile[-1][0] = raw_size
                 disk_csizes, disk_csteps, diskcached_tensors = \
-                    solver.get_cache_solution(self.args['world_size']*remaining_samples, disk_profile, self.config.diskcache_size, tight=False)
+                    get_cache_solution(self.args['world_size']*remaining_samples, disk_profile, self.config.diskcache_size, tight=False)
                 if -1 in disk_csteps:
                     disk_csteps = disk_csteps[1:]
                     disk_csizes = disk_csizes[1:]
@@ -221,79 +221,17 @@ class HyCache:
             print(f"(Appcache steps, Diskcache steps) | (Appcache size, diskcache size): ({memcache_steps}, {disk_csteps}) | ({memcache_sizes}, {disk_csizes})")
             ####################### Implementation:  4. ILP Solver #######################
             ####################### Implementation:  5. Active Memory Estimator #######################
-            self.args['max_workers'] = get_worker_profile(self.args.copy(), self.config.dataset)
-            ###################################################################################################################
-            if self.config.memcache_size > 0:
-                max_prefetch_queue_size = max([2*self.args['batch_size']*i[0] for i in mem_profile.values()])
-                num_pipes = len(np.unique(memcache_steps + disk_csteps))
-                num_pipes = num_pipes + 1 if memcached_tensors + diskcached_tensors < len(self.config.dataset) else num_pipes
-                required_workers = sum([self.args['max_workers'][step] for step in disk_csteps])
-                required_workers = required_workers + self.args['max_workers'][-1] if memcached_tensors + diskcached_tensors < len(self.config.dataset) else required_workers
-                offset = (required_workers * self.args['max_workers']['per_worker_mem'] + num_pipes*max_prefetch_queue_size) / 1024
-                memcache_sizes[0] -= offset
-                # This addition should actually be multiplied with the bloatup too. Let's see if we can make it work without doing so.
-                if(remaining_samples > self.args['batch_size']) and disk_csizes[-1] > 0:
-                    disk_csizes[-1] = disk_csizes[-1] if sum(disk_csizes) >= self.config.diskcache_size \
-                        else min(disk_csizes[-1] + self.config.diskcache_size - sum(disk_csizes), disk_csizes[-1] + offset)
-                    disk_csizes = [ceil(i) for i in disk_csizes]
-                else:
-                    disk_csizes = [0]
-                memcache_sizes = [int(ceil(i/self.args['world_size'])) for i in memcache_sizes]
-                print(f"Sizes after adjustment with offset {offset}GB: (Appcache size, diskcache size): ({memcache_sizes}, {disk_csizes})")
-            disk_csizes = [int(ceil(i/self.args['world_size'])) for i in disk_csizes]
+            memcache_sizes, memcache_steps, disk_csizes, disk_csteps = adjust_for_activemem(
+                self.args, memcache_steps, disk_csteps, mem_profile, memcached_tensors, diskcached_tensors, remaining_samples, self.config)
             self.config.diskcache_size = sum(disk_csizes)
             self.config.memcache_size = sum(memcache_sizes)
             ####################### Implementation:  5. Active Memory Estimator #######################
             ####################### Implementation:  6. Pipeline Generator #######################
-
+            self.built_pipes = merge_and_collect_pipes(memcache_steps, disk_csteps, memcache_sizes, disk_csizes, self.config, self.args)
             # Merge common step pipelines
-            common_steps = [x for x in memcache_steps if x in disk_csteps]
-            uncached_samples = self.config.dataset
-            # Create mixed pipelines
-            try:
-                shutil.rmtree(self.config.disk_cloc + "/*")
-            except:
-                pass
-            if(len(common_steps) > 0) and self.args['merge']:
-               for step in common_steps:
-                   print(f"Using merged pipeline at step-{step}", self.args['merge'])
-                   self.args['num_cworkers'] = self.args['threads'] // 2
-                   cache_size = memcache_sizes[memcache_steps.index(step)]
-                   disk_csize = disk_csizes[disk_csteps.index(step)]
-                   pipe, uncached_samples = create_pipe(self.args, uncached_samples, step, cache_size, disk_csize, pipetype='cached')
-                   self.built_pipes.append(pipe)
-                   disk_csizes.remove(disk_csize)
-                   memcache_sizes.remove(cache_size)
-                   disk_csteps.remove(step)
-                   memcache_steps.remove(step)
-            # Create memcache only pipes
-            for i in range(len(memcache_sizes)):
-                if(len(uncached_samples) < self.args['batch_size']):
-                    break
-                self.args['num_cworkers'] = 0
-                pipe, uncached_samples = \
-                    create_pipe(self.args, uncached_samples, memcache_steps[i], cache_size=memcache_sizes[i], pipetype='cached')
-                self.built_pipes.append(pipe)
 
-            # Create Diskcache only pipes
-            if self.config.diskcache_size > 0:
-                for i in range(len(disk_csizes)):
-                    if disk_csteps[i] == -1:
-                        continue
-                    if(len(uncached_samples) < self.args['batch_size']):
-                        break
-                    self.args['num_cworkers'] = self.args['max_workers'][disk_csteps[i]]
-                    pipe, uncached_samples = \
-                        create_pipe(self.args, uncached_samples, disk_csteps[i], disk_csize=disk_csizes[i], pipetype='cached')
-                    self.built_pipes.append(pipe)
-
-            if(len(uncached_samples) > self.args['batch_size']):
-                print("Creating uncached pipe")
-                self.args['num_workers'] = self.args['max_workers'][-1]
-                pipe, _ = create_pipe(self.args, uncached_samples, pipetype='vanilla')
-                self.built_pipes.append(pipe)
         print(f"Using pipes: {self.built_pipes}, {[i.py_num_workers for i in self.built_pipes]}, {[pipe.input.full_iterations for pipe in self.built_pipes]}")
-        iter = SHCGenericIterator(self.built_pipes)
+        iter = HyCacheGenericIterator(self.built_pipes)
         ####################### Implementation:  6. Pipeline Generator #######################
         return iter
 

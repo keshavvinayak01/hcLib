@@ -6,8 +6,8 @@ from typing import Any, Optional
 from dataclasses import dataclass
 from nvidia.dali.pipeline import Pipeline
 from pipegen import create_pipe, merge_and_collect_pipes
-from annotate import get_annotated_computational_graph
-from profiler import profile_device, filter_important_steps, profile_steps
+from annotate import get_annotated_computational_graph, filter_important_steps
+from profiler import profile_device, profile_steps
 from memory_estimator import adjust_for_activemem
 from iterator import HyCacheGenericIterator
 from math import ceil

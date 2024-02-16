@@ -122,25 +122,6 @@ def profile_device(args, filenames, profile='disk'):
     logging_data = {key: [logging_data[key][0], logging_data[-1][1] - logging_data[key][1]] for key in sorted(logging_data)}
     return logging_data
 
-def filter_important_steps(args, filenames):
-    input_batch = [filenames[0]]*args['batch_size']
-    cc_steps = []
-    sizes = []
-    bloatup = []
-
-    for step in range(args['cache_steps']-1, 0, -1):
-        args['num_workers'] = 0
-        pipe, _ = \
-                create_pipe(args, input_batch, profile_helpers={'profile_step': step}, pipetype='vanilla')
-        batch = pipe.run()
-        samples = [np.array(batch[0].at(i)) for i in range(len(batch[0]))]
-        batchsize = sum([sample.nbytes for sample in samples])
-        bloatup.append((batchsize/sizes[-1]) if len(sizes) > 0 else 1)
-        if(len(sizes) == 0 or batchsize != sizes[-1]):
-            cc_steps.append(step)
-        sizes.append(batchsize)
-    return cc_steps, bloatup
-
 def profile_steps(args, filenames):
     samples = filenames.copy()[ : int(len(filenames) * args['profile_factor'])]
     logfile = os.path.join(args['logdir'], f'steps_profile.log')

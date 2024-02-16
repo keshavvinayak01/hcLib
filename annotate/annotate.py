@@ -2,6 +2,7 @@ import os
 import ast
 import inspect
 import importlib
+from pipegen import create_pipe
 
 class AnnotationTransformer(ast.NodeTransformer):
     def __init__(self):
@@ -104,3 +105,22 @@ def get_annotated_computational_graph(pipe):
     module = importlib.import_module('__temp')
     class_obj = getattr(module, pipe.__name__, None)
     return class_obj
+
+def filter_important_steps(args, filenames):
+    input_batch = [filenames[0]]*args['batch_size']
+    cc_steps = []
+    sizes = []
+    bloatup = []
+
+    for step in range(args['cache_steps']-1, 0, -1):
+        args['num_workers'] = 0
+        pipe, _ = \
+                create_pipe(args, input_batch, profile_helpers={'profile_step': step}, pipetype='vanilla')
+        batch = pipe.run()
+        samples = [np.array(batch[0].at(i)) for i in range(len(batch[0]))]
+        batchsize = sum([sample.nbytes for sample in samples])
+        bloatup.append((batchsize/sizes[-1]) if len(sizes) > 0 else 1)
+        if(len(sizes) == 0 or batchsize != sizes[-1]):
+            cc_steps.append(step)
+        sizes.append(batchsize)
+    return cc_steps, bloatup

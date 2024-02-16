@@ -5,8 +5,6 @@ import numpy as np
 from typing import Any, Optional
 from dataclasses import dataclass
 from nvidia.dali.pipeline import Pipeline
-# from nvidia.dali.plugin.base_iterator import _DaliBaseIterator
-# from nvidia.dali.plugin.pytorch import DALIGenericIterator, LastBatchPolicy
 from pipegen import create_pipe, merge_and_collect_pipes
 from annotate import get_annotated_computational_graph
 from profiler import profile_device, filter_important_steps, profile_steps
@@ -62,9 +60,9 @@ class BasePipeline(Pipeline):
 class CacheConfig:
     memcache_size: int
     diskcache_size: int
-    disk_cloc: str = os.getcwd() + "/disk_cache/"
     cache_steps: int
     dataset: list
+    disk_cloc: str = os.getcwd() + "/disk_cache/"
     label_func: Optional[Any] = None
     
     def __post_init__(self):
@@ -107,10 +105,10 @@ class HyCache:
         self.config = CacheConfig(
             memcache_size=memory_budget,
             diskcache_size=disk_budget,
-            disk_cloc=disk_cloc,
             cache_steps=cache_steps,
             dataset=dataset,
-            label_func=label_func
+            label_func=label_func,
+            disk_cloc=disk_cloc
         )
 
         ####################### Implementation:  1. Annotate #######################

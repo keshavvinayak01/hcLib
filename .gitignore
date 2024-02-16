@@ -1,0 +1,4 @@
+build/*
+dist/*
+hcLib.egg-info/*
+*.pyc

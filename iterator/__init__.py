@@ -1,1 +1,1 @@
-from . import HyCacheGenericIterator
+from .iterator import HyCacheGenericIterator

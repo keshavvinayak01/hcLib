@@ -7,14 +7,7 @@ We present an automated tool, HyCache, a novel hybrid caching mechanism designed
 [[pdf]]()  [[slides]]()
 
 # Usage
-```python3
-HyCache(pipeline, dataset, memory_budget, disk_budget, cache_steps, disk_cloc, logdir, batch_size,
-    profile_factor, threads, rank, world_size, directio, merge)
-```
 <!-- - A class that takes an nvidia.dali.Pipeline object, a user-provided mem_budget, disk_budget (in GBs), and max_cpu's to limit pipeline process allocation. If not provided, `memory_budget` is assumed to be the size of available memory. `disk_budget` needs a `disk_loc` parameter that specifies the location of the disk cache (Disabled by default).   -->
-
-- A class that takes an nvidia.dali.Pipeline object, amongst other useful arguments. This is the entry point into the library, and the class returns the optimized iterator for preprocessing upon calling `.build()` on the class object.
-
 
 This is how you would typically write a Preprocessing pipeline to leverage HyCache:
 ```python3
@@ -73,6 +66,8 @@ opt_pipe_iter = HyCache(Preprocessor , ...).build()
 for batch in opt_pipe_iter:
     ...
 ```
+`HyCache` class is the entry point into the library, which takes an nvidia.dali.Pipeline object, amongst other useful arguments. The class returns the optimized iterator for preprocessing upon calling `.build()` on the class object.
+
 # Implementation:
 Hycache is implemented in 5 basic blocks, explained in the figure below:
 

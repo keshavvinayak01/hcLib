@@ -86,7 +86,7 @@ class HyCache:
     """
     def __init__(self,
                  pipe: Pipeline,
-                 dataset: Pipeline,
+                 dataset: list,
                  memory_budget: int,
                  disk_budget: int,
                  cache_steps: int,

@@ -1,23 +1,27 @@
 # Introduction
-> empty for now
-#
-# API CALLS
+This repository contains the source code implementation of the Conference'25 paper "HyCache: Hybrid Caching for Accelerating DNN Training
+Input Pipelines". This work was done as part of my thesis project in my Masters at IISc, Bangalore. This source code is available under the MIT License.
+
+We present an automated tool, HyCache, a novel hybrid caching mechanism designed to accelerate DNN training pipelines. We demonstrate its effectiveness through comprehensive evaluation and comparison with existing approaches. Hycace leverages both memory and storage for caching, orchestrating the usage of these resources automatically, showing a significantly reduced data preprocessing time, thereby addressing the bottleneck in DNN training input pipelines. Our experiments have validated that HyCache can achieve substantial performance improvements, with gains ranging from 1.11× to 5.3× over traditional preprocessing pipelines. The implementation of HyCache is simple and open-sourced, hence can be adopted to other preprocessing frameworks.
+
+[[pdf]]()  [[slides]]()
+
+# Usage
 ```python3
 HyCache(pipeline, dataset, memory_budget, disk_budget, cache_steps, disk_cloc, logdir, batch_size,
     profile_factor, threads, rank, world_size, directio, merge)
 ```
-> More details about this class is present here: [hcLib.md](hcLib/hcLib.md)
 <!-- - A class that takes an nvidia.dali.Pipeline object, a user-provided mem_budget, disk_budget (in GBs), and max_cpu's to limit pipeline process allocation. If not provided, `memory_budget` is assumed to be the size of available memory. `disk_budget` needs a `disk_loc` parameter that specifies the location of the disk cache (Disabled by default).   -->
 
 - A class that takes an nvidia.dali.Pipeline object, amongst other useful arguments. This is the entry point into the library, and the class returns the optimized iterator for preprocessing upon calling `.build()` on the class object.
 
 
-This is how you would typically write a Preprocessing pipeline in DALI:
+This is how you would typically write a Preprocessing pipeline to leverage HyCache:
 ```python3
-class ImagenetPipeline(Pipeline):
+class Preprocesser(BasePipeline):
     def __init__(
         self, batch_size, num_threads, num_workers, device_id, prefetch_depth=2, samples=[]):
-        super(ImagenetPipeline, self).__init__(
+        super(Preprocesser, self).__init__(
             batch_size,
             num_threads,
             device_id,
@@ -27,7 +31,8 @@ class ImagenetPipeline(Pipeline):
             py_num_workers=num_workers,
             enable_memory_stats=True,
         )
-        self.input = ExternalInputCallable(batch_size, samples)
+        
+        ...
 
     def define_graph(self):
         rng = fn.random.coin_flip(probability=0.5)
@@ -36,9 +41,7 @@ class ImagenetPipeline(Pipeline):
             source=self.input,num_outputs=3,batch=False,parallel=True,dtype=[types.FLOAT, types.INT32, types.INT32])
         
         # Step 1
-        images = fn.cast(images, dtype=types.UINT8)
-        images = fn.decoders.image(
-            images, device="cpu")
+        images = fn.decoders.image(fn.cast(images, dtype=types.UINT8), device="cpu")
 
         # Step 2
         images = fn.resize(
@@ -49,73 +52,70 @@ class ImagenetPipeline(Pipeline):
             images,mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], dtype=types.FLOAT)
 
         # Step 4
-        images = fn.cast(images, dtype=types.UINT8)
-        images = fn.flip(images, horizontal=rng)
+        images = fn.flip(fn.cast(images, dtype=types.UINT8), horizontal=rng)
     
         return [images, labels, sample_idx]
 ```
-To leverage the *SHC* modified pipeline, the user needs to provide hints as follows:
-```python3
-class ImagenetPipeline(BasePipeline):
-    def __init__(
-        self, batch_size, num_threads, num_workers, device_id, prefetch_depth=2):
-        super(ImagenetPipeline, self).__init__(
-            batch_size,
-            num_threads,
-            num_workers,
-            device_id,
-            seed=12,
-            prefetch_queue_depth=prefetch_depth,
-            py_start_method='spawn',
-            py_num_workers=num_workers,
-            enable_memory_stats=True,
-        )
-
-    def define_graph(self):
-        rng = fn.random.coin_flip(probability=0.5)
-        images, labels, sample_idx = fn.external_source(
-            source=self.input,num_outputs=3,batch=False,parallel=True,dtype=[types.FLOAT, types.INT32, types.INT32])
-        
-        if self.condition(self.profile_helpers, 1):
-            images = fn.cast(images, dtype=types.UINT8)
-            images = fn.decoders.image(
-                images, device="cpu")
-
-        if self.condition(self.profile_helpers, 2):
-            images = fn.resize(
-                images, device=self.device_id, resize_x=224, resize_y=224, interp_type=types.INTERP_TRIANGULAR)
-
-        if self.condition(self.profile_helpers, 3):
-            images = fn.crop_mirror_normalize(
-                images,mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], dtype=types.FLOAT)
-
-        if self.condition(self.profile_helpers, 4):
-            images = fn.cast(images, dtype=types.UINT8)
-            images = fn.flip(images, horizontal=rng)
-    
-        return [images, labels, sample_idx]
-```
+There are some modifications to the regular DALI Pipeline class definition:
 - The parent class is not `nvidia.dali.Pipeline` anymore, it would be `shc_lib.pipeline.BasePipeline`
-- The user needs to use `self.input` assuming it is defined.
-- The user can separate steps using the if condition, which takes an internal parameter `condition` and `profile_helpers`.
-- The second parameter of `condition` is the step number, which increases iteratively with steps.
+- The user needs to use `fn.external_source` and `self.input` as the internal function, which we define internally.
+- It is advised to generally nest the cast operation inside the main preprocesser function, to make it a singular step, easing the profiling process.
 
+## An example of how to use HyCache in your DNN training code:
 ```python3
-HyCachePipe.profile(time_limit=200)
-```
-- Calls the profiler that decides the majority of resource allocation based on provided budget and available system resources. We'll assume an unconstrained profiling time by default, but will profile in a limited dataset if a time limit is provided. 
+from hcLib import BasePipeline, HyCache
 
-> Will need to check how long the profiling takes for the optimal allocations in available pipelines.
-
-```python3
-for batch in HyCachePipe:
+class Preprocesser(BasePipeline)
     ...
+
+opt_pipe_iter = HyCache(Preprocessor , ...).build()
+
+for batch in opt_pipe_iter:
     ...
 ```
-- Custom Iterator that internally modifies the provided pipeline and yields batches as per the internal implemented policy.
-- The first epoch will be used for creating the cache(s), will also generate data regularly for the training task.
+# Implementation:
+Hycache is implemented in 5 basic blocks, explained in the figure below:
 
-# Profiling
+<img title="a title" alt="Alt text" src="./images/implementation.png">
+
+Details about each specific block is present in their respective submodules:
+
+- [Annotater](annotate/annotate.md)
+- [Profiler](profiler/profiler.md)
+- [ILP Solver](solver/solver.md) 
+- [Active Memory Estimator](memory_estimator/estimator.md)
+- [Pipeline Generator](pipegen/pipegen.md) 
+
+# Installation
+You can simply use PyPi for insllation, or use the repository to build and install manually
+## PyPi installation 
+Simply run the following command and it'll install the package and its dependancies automatically
+```
+pip3 install hcLib
+```
+
+## Local installation
+To install and setup HyCache locally, we recommend using a virtual environment:
+```
+python3 -m venv <virtualenv_name>
+source <virtualenv_name>/bin/activate
+```
+### Clone the Github repository
+```
+git clone https://github.com/keshavvinayak01/hcLib
+```
+
+### Locally install the `hcLib` package
+`cd` into the git folder, and run
+```
+python3 setup.py bdist_wheel
+pip install dist/hcLib-0.1.0-py3-none-any.whl
+```
+OR
+```
+pip install .
+```
+<!-- # Profiling
 Initialized by the `.profile()` method of the provided `HyCachePipe` class. Profiling is done for selection of cache steps on the memory, on the disk, and to scale the number of fetchers (Python processes used for fetching data from disk).
 
 ## **Memory**
@@ -237,8 +237,4 @@ total_time = (fetch_time + pp_time) + max(fetch_time, pp_time) * (nbatches-1)
     - Given memory associated with each extra worker(say x`MB`), fetch and compute times of the pipelines, we can calculate speedup per added x`MB`.
     - Speedup per x`MB` of using cache can be easily approximated, as we already have the savings associated with a tensor.
 
-- Given these two metrics, we can select which is the more performance optimal worker allocation.
-
-## Implementation
-
-The following image explains the workflow of HyCache
+- Given these two metrics, we can select which is the more performance optimal worker allocation. -->
